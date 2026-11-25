@@ -25,6 +25,8 @@ Source0: %{url}/dist/%{name}-%{version}%{?extraver}.tar.gz
 Source1: sudoers
 Source2: sudo-ldap.conf
 Requires: pam
+Requires(post): %{_sbindir}/update-alternatives
+Requires(postun): %{_sbindir}/update-alternatives
 
 BuildRequires: make
 BuildRequires: pam-devel
@@ -34,6 +36,7 @@ BuildRequires: audit-libs-devel libcap-devel
 BuildRequires: libselinux-devel
 BuildRequires: systemd-rpm-macros
 BuildRequires: zlib-devel
+BuildRequires: python3-devel
 
 
 Patch1: 0001-coverity.patch
@@ -59,6 +62,16 @@ audit trail of who did what), a configurable timeout of the sudo
 command, and the ability to use the same configuration file (sudoers)
 on many different machines.
 
+%package        ldap
+Summary:        LDAP support plugin for %{name}
+Requires:       %{name}%{?_isa} = %{version}-%{release}
+Requires(post): %{_sbindir}/update-alternatives
+Requires(postun): %{_sbindir}/update-alternatives
+
+%description    ldap
+The %{name}-ldap package contains the sudoers LDAP plugin that allows
+sudoers authorization rules to be stored in an LDAP directory.
+
 %package        devel
 Summary:        Development files for %{name}
 Requires:       %{name} = %{version}-%{release}
@@ -69,9 +82,7 @@ plugins that use %{name}.
 
 %package        python-plugin
 Summary:        Python plugin for %{name}
-Requires:       %{name} = %{version}-%{release}
-BuildRequires:  python3-devel
-
+Requires:       %{name}%{?_isa} = %{version}-%{release}
 
 %description    python-plugin
 %{name}-python-plugin allows using sudo plugins written in Python.
@@ -79,9 +90,13 @@ BuildRequires:  python3-devel
 %prep
 %autosetup -p1 -n %{name}-%{version}%{?extraver}
 
+# Create a clean second copy of source tree for LDAP build
+cp -a . ../%{name}-ldap-%{version}%{?extraver}
+
 %build
 # Remove bundled copy of zlib
 rm -rf zlib/
+rm -rf ../%{name}-ldap-%{version}%{?extraver}/zlib/
 
 %ifarch s390 s390x sparc64
 F_PIE=-fPIE
@@ -91,7 +106,39 @@ F_PIE=-fpie
 
 export CFLAGS="$RPM_OPT_FLAGS $F_PIE" LDFLAGS="-pie -Wl,-z,relro -Wl,-z,now"
 
+# Build minimal variant (without LDAP)
+%configure \
+        --prefix=%{_prefix} \
+        --sbindir=%{_sbindir} \
+        --libdir=%{_libdir} \
+        --docdir=%{_pkgdocdir} \
+        --enable-tmpfiles.d=%{_tmpfilesdir} \
+        --disable-openssl \
+        --disable-root-mailer \
+        --enable-intercept \
+        --disable-log-server \
+        --disable-log-client \
+        --with-logging=syslog \
+        --with-logfac=authpriv \
+        --with-pam \
+        --with-pam-login \
+        --with-editor=/usr/bin/vi \
+        --with-env-editor \
+        --with-ignore-dot \
+        --with-tty-tickets \
+        --without-ldap \
+        --with-selinux \
+        --with-sendmail=/usr/sbin/sendmail \
+        --with-passprompt="[sudo] password for %p: " \
+        --enable-python \
+        --enable-zlib=system \
+        --with-linux-audit \
+        --with-sssd
 
+make %{?_smp_mflags}
+
+# Build LDAP variant in second directory
+pushd ../%{name}-ldap-%{version}%{?extraver}
 %configure \
         --prefix=%{_prefix} \
         --sbindir=%{_sbindir} \
@@ -121,17 +168,23 @@ export CFLAGS="$RPM_OPT_FLAGS $F_PIE" LDFLAGS="-pie -Wl,-z,relro -Wl,-z,now"
         --with-linux-audit \
         --with-sssd
 
-make
+make %{?_smp_mflags}
+popd
 
 %check
 make check
+pushd ../%{name}-ldap-%{version}%{?extraver}
+make check
+popd
 
 %install
 rm -rf $RPM_BUILD_ROOT
 
 # Update README.LDAP (#736653)
 sed -i 's|/etc/ldap\.conf|%{_sysconfdir}/sudo-ldap.conf|g' README.LDAP.md
+sed -i 's|/etc/ldap\.conf|%{_sysconfdir}/sudo-ldap.conf|g' ../%{name}-ldap-%{version}%{?extraver}/README.LDAP.md
 
+# Install base (minimal) build
 make install DESTDIR="$RPM_BUILD_ROOT" install_uid=`id -u` install_gid=`id -g` sudoers_uid=`id -u` sudoers_gid=`id -g`
 
 chmod 755 $RPM_BUILD_ROOT%{_bindir}/* $RPM_BUILD_ROOT%{_sbindir}/*
@@ -139,7 +192,29 @@ install -p -d -m 700 $RPM_BUILD_ROOT/var/db/sudo
 install -p -d -m 700 $RPM_BUILD_ROOT/var/db/sudo/lectured
 install -p -d -m 750 $RPM_BUILD_ROOT/etc/sudoers.d
 install -p -c -m 0440 %{SOURCE1} $RPM_BUILD_ROOT/etc/sudoers
+
+# Rename minimal sudoers.so to sudoers-minimal.so in libexecdir
+mv $RPM_BUILD_ROOT%{_libexecdir}/sudo/sudoers.so $RPM_BUILD_ROOT%{_libexecdir}/sudo/sudoers-minimal.so
+
+# Install LDAP-enabled sudoers plugin using libtool (handles proper rpath relinking)
+make -C ../%{name}-ldap-%{version}%{?extraver}/plugins/sudoers install-plugin \
+    DESTDIR="$RPM_BUILD_ROOT" install_uid=`id -u` install_gid=`id -g` sudoers_uid=`id -u` sudoers_gid=`id -g`
+
+# Rename LDAP sudoers.so to sudoers-ldap.so in libexecdir
+mv $RPM_BUILD_ROOT%{_libexecdir}/sudo/sudoers.so $RPM_BUILD_ROOT%{_libexecdir}/sudo/sudoers-ldap.so
+
+# Ghost symlink placeholder for alternatives
+touch $RPM_BUILD_ROOT%{_libexecdir}/sudo/sudoers.so
+
+# Install sudo-ldap.conf
 install -p -c -m 0640 %{SOURCE2} $RPM_BUILD_ROOT/%{_sysconfdir}/sudo-ldap.conf
+
+# Install LDAP manual pages from LDAP build directory
+if [ -f ../%{name}-ldap-%{version}%{?extraver}/docs/sudoers.ldap.mdoc ]; then
+    install -p -c -m 0644 ../%{name}-ldap-%{version}%{?extraver}/docs/sudoers.ldap.mdoc $RPM_BUILD_ROOT%{_mandir}/man5/sudoers.ldap.5
+elif [ -f ../%{name}-ldap-%{version}%{?extraver}/docs/sudoers.ldap.man ]; then
+    install -p -c -m 0644 ../%{name}-ldap-%{version}%{?extraver}/docs/sudoers.ldap.man $RPM_BUILD_ROOT%{_mandir}/man5/sudoers.ldap.5
+fi
 
 # create sudo-ldap.conf man
 echo ".so man5/sudoers.ldap.5" > sudo-ldap.conf.5
@@ -177,7 +252,7 @@ rm sudo.lang sudoers.lang
 mkdir -p $RPM_BUILD_ROOT/etc/pam.d
 
 cat > $RPM_BUILD_ROOT/etc/pam.d/sudo << EOF
-#%%PAM-1.0
+#%PAM-1.0
 auth       include      system-auth
 account    include      system-auth
 password   include      system-auth
@@ -185,7 +260,7 @@ session    include      system-auth
 EOF
 
 cat > $RPM_BUILD_ROOT/etc/pam.d/sudo-i << EOF
-#%%PAM-1.0
+#%PAM-1.0
 auth       include      sudo
 account    include      sudo
 password   include      sudo
@@ -193,11 +268,28 @@ session    optional     pam_keyinit.so force revoke
 session    include      sudo
 EOF
 
+%post
+%{_sbindir}/update-alternatives --install \
+    %{_libexecdir}/sudo/sudoers.so sudoers-so %{_libexecdir}/sudo/sudoers-minimal.so 10
+
+%postun
+if [ $1 -eq 0 ]; then
+    %{_sbindir}/update-alternatives --remove sudoers-so %{_libexecdir}/sudo/sudoers-minimal.so
+fi
+
+%post ldap
+%{_sbindir}/update-alternatives --install \
+    %{_libexecdir}/sudo/sudoers.so sudoers-so %{_libexecdir}/sudo/sudoers-ldap.so 50
+
+%postun ldap
+if [ $1 -eq 0 ]; then
+    %{_sbindir}/update-alternatives --remove sudoers-so %{_libexecdir}/sudo/sudoers-ldap.so
+fi
+
 %files -f sudo_all.lang
 %defattr(-,root,root)
 %attr(0440,root,root) %config(noreplace) /etc/sudoers
 %attr(0640,root,root) %config(noreplace) /etc/sudo.conf
-%attr(0640,root,root) %config(noreplace) %{_sysconfdir}/sudo-ldap.conf
 %attr(0750,root,root) %dir /etc/sudoers.d/
 %config(noreplace) /etc/pam.d/sudo
 %config(noreplace) /etc/pam.d/sudo-i
@@ -214,7 +306,8 @@ EOF
 %attr(0755,root,root) %{_libexecdir}/sudo/sesh
 %attr(0644,root,root) %{_libexecdir}/sudo/sudo_noexec.so
 %attr(0644,root,root) %{_libexecdir}/sudo/audit_json.so
-%attr(0644,root,root) %{_libexecdir}/sudo/sudoers.so
+%attr(0644,root,root) %{_libexecdir}/sudo/sudoers-minimal.so
+%ghost %{_libexecdir}/sudo/sudoers.so
 %attr(0644,root,root) %{_libexecdir}/sudo/group_file.so
 %attr(0644,root,root) %{_libexecdir}/sudo/system_group.so
 %attr(0644,root,root) %{_libexecdir}/sudo/sudo_intercept.so
@@ -222,8 +315,6 @@ EOF
 %{_libexecdir}/sudo/libsudo_util.so.?
 %{_libexecdir}/sudo/libsudo_util.so
 %{_mandir}/man5/sudoers.5*
-%{_mandir}/man5/sudoers.ldap.5*
-%{_mandir}/man5/sudo-ldap.conf.5*
 %{_mandir}/man5/sudo.conf.5*
 %{_mandir}/man8/sudo.8*
 %{_mandir}/man8/sudoedit.8*
@@ -237,6 +328,13 @@ EOF
 %license LICENSE.md
 %exclude %{_pkgdocdir}/ChangeLog
 
+%files ldap
+%attr(0644,root,root) %{_libexecdir}/sudo/sudoers-ldap.so
+%attr(0640,root,root) %config(noreplace) %{_sysconfdir}/sudo-ldap.conf
+%{_mandir}/man5/sudoers.ldap.5*
+%{_mandir}/man5/sudo-ldap.conf.5*
+%doc README.LDAP.md
+%doc docs/schema.*
 
 %files devel
 %doc plugins/sample/sample_plugin.c
