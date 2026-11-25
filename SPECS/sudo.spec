@@ -90,13 +90,12 @@ Requires:       %{name}%{?_isa} = %{version}-%{release}
 %prep
 %autosetup -p1 -n %{name}-%{version}%{?extraver}
 
-# Create a clean second copy of source tree for LDAP build
-cp -a . ../%{name}-ldap-%{version}%{?extraver}
-
-%build
 # Remove bundled copy of zlib
 rm -rf zlib/
-rm -rf ../%{name}-ldap-%{version}%{?extraver}/zlib/
+
+%build
+# Create a clean second copy of source tree for LDAP build
+cp -a . ../%{name}-ldap-%{version}%{?extraver}
 
 %ifarch s390 s390x sparc64
 F_PIE=-fPIE
@@ -182,7 +181,6 @@ rm -rf $RPM_BUILD_ROOT
 
 # Update README.LDAP (#736653)
 sed -i 's|/etc/ldap\.conf|%{_sysconfdir}/sudo-ldap.conf|g' README.LDAP.md
-sed -i 's|/etc/ldap\.conf|%{_sysconfdir}/sudo-ldap.conf|g' ../%{name}-ldap-%{version}%{?extraver}/README.LDAP.md
 
 # Install base (minimal) build
 make install DESTDIR="$RPM_BUILD_ROOT" install_uid=`id -u` install_gid=`id -g` sudoers_uid=`id -u` sudoers_gid=`id -g`
@@ -252,7 +250,7 @@ rm sudo.lang sudoers.lang
 mkdir -p $RPM_BUILD_ROOT/etc/pam.d
 
 cat > $RPM_BUILD_ROOT/etc/pam.d/sudo << EOF
-#%PAM-1.0
+#%%PAM-1.0
 auth       include      system-auth
 account    include      system-auth
 password   include      system-auth
@@ -260,7 +258,7 @@ session    include      system-auth
 EOF
 
 cat > $RPM_BUILD_ROOT/etc/pam.d/sudo-i << EOF
-#%PAM-1.0
+#%%PAM-1.0
 auth       include      sudo
 account    include      sudo
 password   include      sudo
